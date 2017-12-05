@@ -35,10 +35,21 @@ static void serviceBus(bool loop);
 static float convertToFloat(uint16_t result);
 #endif
 
+#define BIT_LIST_SIZE 1024
+static int bitList[BIT_LIST_SIZE];
+static uint16_t bitListIdx = 0;
+
 int main(void)
 {
     /* Halting WDT */
     MAP_WDT_A_holdTimer();
+#if 1
+    int i;
+    for (i = 0; i < BIT_LIST_SIZE; i++)
+    {
+        bitList[i] = -1;
+    }
+#endif
     MAP_Interrupt_enableSleepOnIsrExit();
 
 #if 1
@@ -52,7 +63,7 @@ int main(void)
     MAP_GPIO_setAsOutputPin(GPIO_PORT_P2, GPIO_PIN2);
 
     MAP_ADC14_enableModule();
-#if 0
+#if 1
     /* Initializing ADC (MCLK/1/1) */
     MAP_ADC14_initModule(ADC_CLOCKSOURCE_MCLK, ADC_PREDIVIDER_1, ADC_DIVIDER_1,
             0);
@@ -63,7 +74,7 @@ int main(void)
 #endif
     /*1Msps *whoa!**/
     MAP_ADC14_setPowerMode(ADC_UNRESTRICTED_POWER_MODE);
-    MAP_ADC14_setSampleHoldTime(ADC_PULSE_WIDTH_8, ADC_PULSE_WIDTH_8);
+    //MAP_ADC14_setSampleHoldTime(ADC_PULSE_WIDTH_8, ADC_PULSE_WIDTH_8);
 
     /* Configuring ADC Memory (ADC_MEM0 A0/A1 Differential) in repeat mode */
     MAP_ADC14_configureSingleSampleMode(ADC_MEM0, true);
@@ -109,18 +120,23 @@ void SysTick_Handler(void)
 
 /*==========*/
 
-#if 0
+#if 1
 // 500ksps
 #define __READER_IEBUS_IDLE_MINIMUM_HIGH_COUNT          100
 #define __READER_IEBUS_START_BIT_MINIMUM_LOW_COUNT      80
 #define __READER_IEBUS_LOGIC_BIT_MINIMUM_LOW_COUNT      5
 #define __READER_IEBUS_LOGIC_HIGH_MAXIMUM_LOW_COUNT     15
-#else
+#elif 0
 // 1Msps
 #define __READER_IEBUS_IDLE_MINIMUM_HIGH_COUNT          200
 #define __READER_IEBUS_START_BIT_MINIMUM_LOW_COUNT      160
 #define __READER_IEBUS_LOGIC_BIT_MINIMUM_LOW_COUNT      10
 #define __READER_IEBUS_LOGIC_HIGH_MAXIMUM_LOW_COUNT     30
+#else //guesswork
+#define __READER_IEBUS_IDLE_MINIMUM_HIGH_COUNT          20
+#define __READER_IEBUS_START_BIT_MINIMUM_LOW_COUNT      16
+#define __READER_IEBUS_LOGIC_BIT_MINIMUM_LOW_COUNT      1
+#define __READER_IEBUS_LOGIC_HIGH_MAXIMUM_LOW_COUNT     3
 #endif
 
 // IEBus address
@@ -298,59 +314,8 @@ static bool isHigh(uint16_t result)
     return (result >> 2) < 198;//745; //0.3 * 8191 / 3.3
 }
 #else
-//#define TEMPS_SIZE 512
-//static int32_t temps[TEMPS_SIZE];
-//static uint16_t tempsidx = 0;
-#if 1
-#define resultToAdcSigned(result) (int32_t)((0x8000 & result) ? (result >> 2) | 0xFFFFC000 : (result >> 2))
-#define isHigh(adcSigned) (adcSigned < 198)  //198 = 0.08 * 8191 / 3.3   // 297 = 0.12  * 8191 / 3.3
-#else
-static bool isHigh(uint16_t result)
-{
-    int32_t temp;
-#ifdef WITH_MV
-    float mV;
-#endif
-
-    if(0x8000 & result)
-    {
-        temp = (result >> 2) | 0xFFFFC000;
-#ifdef WITH_MV
-        mV = ((temp * 3.3f) / 8191);
-#endif
-    }
-    else
-#ifdef WITH_MV
-        mV = ((result >> 2)*3.3f) / 8191;
-#else
-        temp = result >> 2;
-#endif
-#ifdef WITH_MV
-    if (mV < 0.08f)//> 0.12f)
-    {
-        return true;
-    }
-    return false;
-#else
-    temps[tempsidx++] = temp;
-    if(tempsidx >= TEMPS_SIZE)
-    {
-        __no_operation();
-        tempsidx = 0;
-    }
-    if (temp < 198) //198 = 0.08 * 8191 / 3.3
-    //if(temp > 744) //744 = 0.3 * 8191 / 3.3
-    {
-        __no_operation();
-        return true;
-    }
-    __no_operation();
-
-    return false;
-#endif
-}
-#endif
-#endif
+//#define resultToAdcSigned(result) (int32_t)((0x8000 & result) ? (result >> 2) | 0xFFFFC000 : (result >> 2))
+//#define isHigh(adcSigned) (adcSigned < 198)  //198 = 0.08 * 8191 / 3.3   // 297 = 0.12  * 8191 / 3.3
 
 #ifdef REVEAL_TRUE_ADC
 //![Conversion to Real Value]
@@ -370,13 +335,44 @@ static float convertToFloat(uint16_t result)
 }
 //![Conversion to Real Value]
 #endif
+#endif
+typedef struct {
+    struct {
+        unsigned int received;
+        unsigned int processed;
+        unsigned int valid;
+        unsigned int notAcknowledged;
+        unsigned int parityError;
+        unsigned int incomplete;
+        unsigned int tooLong;
+        unsigned int idle;
+    } readerFrames;
+    struct {
+        const unsigned int capacity;
+        unsigned int currentUsage;
+        unsigned int maximumUsage;
+        unsigned int overrun;
+    } readerBitsBuffer;
+    struct {
+        const unsigned int capacity;
+        unsigned int currentUsage;
+        unsigned int maximumUsage;
+        unsigned int overrun;
+    } readerFrameBuffer;
+} VM_IEBUS_STATISTICS;
+
+volatile VM_IEBUS_STATISTICS vmIebusStatistics = {
+        { 0, 0, 0, 0, 0, 0, 0, 0}, // frames
+        { sizeof(readerBitsBuffer), 0, 0, 0 }, // bits buffer
+        { READER_FRAME_BUFFER_ITEMS, 0, 0, 0} // frame buffer
+    };
 
 volatile static uint32_t sampleCount = 0;
 #define HIGH_LOW_LIST_SIZE 1024
 typedef struct  {
     uint8_t high;
-    int32_t adcSigned;
-    uint16_t result;
+    //int32_t adcSigned;
+    //uint16_t result;
     float fl;
 }highLow_t;
 volatile static highLow_t highLowList[HIGH_LOW_LIST_SIZE];
@@ -396,17 +392,110 @@ void ADC14_IRQHandler(void)
 
     status = MAP_ADC14_getEnabledInterruptStatus();
     MAP_ADC14_clearInterruptFlag(status);
+#if 1
+    if(status & ADC_INT0)
+    {
+        uint16_t result = MAP_ADC14_getResult(ADC_MEM0);
+        float floatResult = convertToFloat(result);
+        bool logicHigh = floatResult > 0.28f;
+        if(floatResult > 0.28f)
+        {
+            highLowList[highLowListIdx].fl = floatResult;
+            highLowList[highLowListIdx].high = logicHigh;
+            if(++highLowListIdx >= HIGH_LOW_LIST_SIZE)
+            {
+                __no_operation();
+                highLowListIdx = 0;
+            }
+        }
 
+        if(logicHigh) // logic high
+        {
+            if(busIsHigh)
+            {
+                ++sampleCount;
+
+                if(sampleCount == READER_IEBUS_IDLE_MINIMUM_HIGH_COUNT)
+                {
+                    ++vmIebusStatistics.readerFrames.idle;
+                    busIsBusy = false;
+                    notFrame = true;
+                }
+            }
+            else
+            {
+                busIsHigh = true;
+
+                while(readerBitsBufferNotFull)
+                {
+                    if(readerBitsBufferEndMask == 0)
+                    {
+                        if(++readerBitsBufferEndIndex == READER_BITS_BUFFER_SIZE)
+                        {
+                            readerBitsBufferEndIndex = 0;
+                        }
+
+                        if(readerBitsBufferEndIndex == readerBitsBufferStartIndex)
+                        {
+                            ++vmIebusStatistics.readerBitsBuffer.overrun;
+                            readerBitsBufferNotFull = false;
+                            notFrame = true;
+                            break;
+                        }
+
+                        readerBitsBuffer[readerBitsBufferEndIndex] = 0;
+                        readerBitsBufferEndMask = 0x1;
+                    }
+
+                    if(sampleCount > READER_IEBUS_START_BIT_MINIMUM_LOW_COUNT)
+                    {
+                        ++vmIebusStatistics.readerFrames.received;
+                        readerBitsBuffer[readerBitsBufferEndIndex] |= (readerBitsBufferEndMask << 1);
+                        notFrame = false;
+                    }
+                    else if(notFrame)
+                    {
+                        break;
+                    }
+                    else if(sampleCount < READER_IEBUS_LOGIC_HIGH_MAXIMUM_LOW_COUNT)
+                    {
+                        if(sampleCount < READER_IEBUS_LOGIC_BIT_MINIMUM_LOW_COUNT)
+                        {
+                            break;
+                        }
+
+                        readerBitsBuffer[readerBitsBufferEndIndex] |= readerBitsBufferEndMask;
+                    }
+
+                    readerBitsBufferEndMask <<= 2;
+                    ++readerBitsBufferEndCount;
+                    break;
+                }
+
+                sampleCount = 1;
+            }
+        }
+        else
+        {
+            busIsBusy = true;
+
+            if(busIsHigh)
+            {
+                sampleCount = 1;
+                busIsHigh = false;
+            }
+            else
+            {
+                ++sampleCount;
+            }
+        }
+    }
+#else
     if(status & ADC_INT0)
     {
         uint16_t result = MAP_ADC14_getResult(ADC_MEM0);
         int32_t adcSigned = resultToAdcSigned(result);
-#if 0
-        if(adcSigned < 0)
-        {
-            adcSigned *= -1;
-        }
-#endif
+
         uint8_t logicHigh = isHigh(adcSigned);
         adcResultMax = (adcResultMax < adcSigned) ? adcSigned : adcResultMax;
         adcResultMin = (adcResultMin > adcSigned) ? adcSigned : adcResultMin;
@@ -522,16 +611,17 @@ void ADC14_IRQHandler(void)
             }
         }
     }
+#endif
     //MAP_Interrupt_disableSleepOnIsrExit();
     //Interrupt_disableSleepOnIsrExit();
 }
 
 enum {
-    reason_incomplete,
-    reason_notAcknowledged,
-    reason_parityError,
-    reason_valid,
-    reason_tooLong
+    incomplete,
+    notAcknowledged,
+    parityError,
+    valid,
+    tooLong
 };
 
 static void serviceBus(bool loop)
@@ -539,6 +629,8 @@ static void serviceBus(bool loop)
 #if 0
 #define finishFrame(reason) \
         { \
+            ++vmIebusStatistics.readerFrames.reason; \
+            ++vmIebusStatistics.readerFrames.processed; \
             process = false; \
         }
 #else
@@ -547,12 +639,14 @@ static void serviceBus(bool loop)
 #if 0
 #define finishFrame(reason) \
 { \
+    ++vmIebusStatistics.readerFrames.reason; \
+    ++vmIebusStatistics.readerFrames.processed; \
     switch(reason){ \
-    case reason_valid: MAP_GPIO_setOutputHighOnPin(GPIO_PORT_P1, GPIO_PIN0); break; \
-    case reason_incomplete: MAP_GPIO_setOutputHighOnPin(GPIO_PORT_P2, GPIO_PIN2); break; \
-    case reason_notAcknowledged: MAP_GPIO_setOutputHighOnPin(GPIO_PORT_P2, GPIO_PIN1); break; \
-    case reason_parityError: MAP_GPIO_setOutputHighOnPin(GPIO_PORT_P2, GPIO_PIN0); break; \
-    case reason_tooLong: MAP_GPIO_setOutputHighOnPin(GPIO_PORT_P2, GPIO_PIN2); break; \
+    case valid: MAP_GPIO_setOutputHighOnPin(GPIO_PORT_P1, GPIO_PIN0); break; \
+    case incomplete: MAP_GPIO_setOutputHighOnPin(GPIO_PORT_P2, GPIO_PIN2); break; \
+    case notAcknowledged: MAP_GPIO_setOutputHighOnPin(GPIO_PORT_P2, GPIO_PIN1); break; \
+    case parityError: MAP_GPIO_setOutputHighOnPin(GPIO_PORT_P2, GPIO_PIN0); break; \
+    case tooLong: MAP_GPIO_setOutputHighOnPin(GPIO_PORT_P2, GPIO_PIN2); break; \
     }\
     led_set = 20; \
     process = false; \
@@ -560,8 +654,10 @@ static void serviceBus(bool loop)
 #else
 #define finishFrame(reason)  \
 { \
-    if(reason == reason_valid) {MAP_GPIO_setOutputHighOnPin(GPIO_PORT_P2, GPIO_PIN1);}\
-    else {MAP_GPIO_setOutputHighOnPin(GPIO_PORT_P1, GPIO_PIN0);}\
+    ++vmIebusStatistics.readerFrames.reason; \
+    ++vmIebusStatistics.readerFrames.processed; \
+    if(reason == valid) {MAP_GPIO_setOutputHighOnPin(GPIO_PORT_P1, GPIO_PIN0);}\
+    else {MAP_GPIO_setOutputHighOnPin(GPIO_PORT_P2, GPIO_PIN2);}\
     led_set = 20; \
     process = false; \
 }
@@ -616,7 +712,7 @@ static void serviceBus(bool loop)
                 }
 
                 unsigned int endIndex = readerBitsBufferEndIndex;
-#if 0
+#if 1
                 if(endIndex < readerBitsBufferStartIndex)
                 {
                     vmIebusStatistics.readerBitsBuffer.currentUsage = (READER_BITS_BUFFER_SIZE - readerBitsBufferStartIndex + endIndex + 1) * sizeof(unsigned int);
@@ -632,6 +728,13 @@ static void serviceBus(bool loop)
                 }
 #endif
                 int bit = (readerBitsBuffer[readerBitsBufferStartIndex] >> readerBitsBufferStartShift) & 0x3;
+                bitList[bitListIdx++] = bit;
+                if(bitListIdx >= BIT_LIST_SIZE)
+                {
+                    __no_operation();
+                    bitListIdx = 0;
+                }
+
                 __no_operation();
 
                 ++readerBitsBufferStartCount;
@@ -641,9 +744,8 @@ static void serviceBus(bool loop)
                     // the previous frame didn't finish
                     if(process)
                     {
-                        //finishFrame(incomplete);
                         //__no_operation();
-                        finishFrame(reason_incomplete);
+                        finishFrame(incomplete);
                     }
 
                     // prepare buffer
@@ -681,9 +783,8 @@ static void serviceBus(bool loop)
 
                                 if(checkAcknowledgement)
                                 {
-                                    //finishFrame(notAcknowledged);
                                     //__no_operation();
-                                    finishFrame(reason_notAcknowledged);
+                                    finishFrame(notAcknowledged);
                                     continue;
                                 }
                             }
@@ -694,9 +795,8 @@ static void serviceBus(bool loop)
                             // data is invalid if high bit count is odd
                             if((frameHighBitCount & 0x1))
                             {
-                                //finishFrame(parityError);
                                 //__no_operation();
-                                finishFrame(reason_parityError);
+                                finishFrame(parityError);
                                 continue;
                             }
                         }
@@ -726,25 +826,24 @@ static void serviceBus(bool loop)
 
                                 if(readerFrameBufferEnd == readerFrameBufferStart)
                                 {
-                                    //++vmIebusStatistics.readerFrameBuffer.overrun;
+                                    ++vmIebusStatistics.readerFrameBuffer.overrun;
                                     readerFrameBufferStart->valid = false;
                                     readerFrameBufferStart = (readerFrameBufferStart == lastReaderFrameBuffer) ? readerFrameBuffer : (readerFrameBufferStart + 1);
                                 }
                                 else
                                 {
-                                    //++vmIebusStatistics.readerFrameBuffer.currentUsage;
+                                    ++vmIebusStatistics.readerFrameBuffer.currentUsage;
 
-                                    //if(vmIebusStatistics.readerFrameBuffer.currentUsage > vmIebusStatistics.readerFrameBuffer.maximumUsage)
-                                    //{
-                                    //    vmIebusStatistics.readerFrameBuffer.maximumUsage = vmIebusStatistics.readerFrameBuffer.currentUsage;
-                                    //}
+                                    if(vmIebusStatistics.readerFrameBuffer.currentUsage > vmIebusStatistics.readerFrameBuffer.maximumUsage)
+                                    {
+                                        vmIebusStatistics.readerFrameBuffer.maximumUsage = vmIebusStatistics.readerFrameBuffer.currentUsage;
+                                    }
                                 }
 
                                 //MUTEX UNLOCK
 
-                                //finishFrame(valid);
                                 //__no_operation();
-                                finishFrame(reason_valid);
+                                finishFrame(valid);
                                 continue;
                             }
                         }
@@ -766,8 +865,7 @@ static void serviceBus(bool loop)
                                 // ignore multi-frame data for now; should be okay since all relevant data are single frame
                                 if(fieldDataBuffer > IEBUS_FRAME_DATA_FIELD_MAXIMUM_LENGTH)
                                 {
-                                    //finishFrame(tooLong);
-                                    finishFrame(reason_tooLong);
+                                    finishFrame(tooLong);
                                     continue;
                                 }
 
